@@ -6,7 +6,7 @@ use heed_traits::{BytesDecode, BytesEncode};
 use log::{info, warn};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use prost::Message;
-use raft::prelude::*;
+use raft::{prelude::*, GetEntriesContext};
 
 use std::borrow::Cow;
 use std::fs;
@@ -317,6 +317,7 @@ impl Storage for HeedStorage {
         low: u64,
         high: u64,
         max_size: impl Into<Option<u64>>,
+        context: GetEntriesContext,
     ) -> raft::Result<Vec<Entry>> {
         let store = self.rl();
         let entries = store
@@ -376,7 +377,7 @@ impl Storage for HeedStorage {
         Ok(last_index)
     }
 
-    fn snapshot(&self, _index: u64) -> raft::Result<Snapshot> {
+    fn snapshot(&self, _request_index: u64, _to: u64) -> raft::Result<Snapshot> {
         let store = self.rl();
         match store.snapshot() {
             Ok(Some(snapshot)) => Ok(snapshot),

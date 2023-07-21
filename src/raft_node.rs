@@ -378,6 +378,8 @@ impl<S: Store + 'static> RaftNode<S> {
         }
         let mut ready = self.ready();
 
+        self.handle_messages(ready.take_messages()).await;
+
         if !ready.snapshot().is_empty() {
             let snapshot = ready.snapshot();
             self.store
@@ -387,6 +389,9 @@ impl<S: Store + 'static> RaftNode<S> {
             store.apply_snapshot(snapshot.clone())?;
             info!("on_ready apply_snapshot={:?}", snapshot);
         }
+
+        self.handle_committed_entries(ready.take_committed_entries(), client_send)
+            .await;
 
         if !ready.entries().is_empty() {
             let entries = ready.entries();
@@ -411,14 +416,25 @@ impl<S: Store + 'static> RaftNode<S> {
             info!("on_ready set_hard_state={:?}", hs);
         }
 
-        self.handle_messages(ready.messages.clone()).await;
-
-        if let Some(committed_entries) = ready.committed_entries.take() {
-            self.handle_committed_entries(committed_entries, client_send)
-                .await;
+        if !ready.persisted_messages().is_empty() {
+            // Send out the persisted messages come from the node.
+            self.handle_messages(ready.take_persisted_messages()).await;
         }
 
-        self.advance(ready);
+        // Call `RawNode::advance` interface to update position flags in the raft.
+        let mut light_rd = self.advance(ready);
+        // Update commit index.
+        // if let Some(commit) = light_rd.commit_index() {
+        //     store.wl().mut_hard_state().set_commit(commit);
+        // }
+        // Send out the messages.
+        self.handle_messages(light_rd.take_messages()).await;
+        // Apply all committed entries.
+        self.handle_committed_entries(light_rd.take_committed_entries(), client_send)
+            .await;
+        // Advance the apply index.
+        self.advance_apply();
+
         Ok(())
     }
 

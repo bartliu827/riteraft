@@ -26,6 +26,8 @@ struct Options {
     peer_addr: Option<String>,
     #[structopt(long)]
     web_server: Option<String>,
+    #[structopt(long)]
+    node_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -64,10 +66,13 @@ impl Store for HashStore {
         Ok(serialize(&self.0.read().unwrap().clone())?)
     }
 
-    async fn restore(&mut self, snapshot: &[u8]) -> RaftResult<()> {
+    async fn restore(&mut self, id: u64, snapshot: &[u8]) -> RaftResult<()> {
         let new: HashMap<String, String> = deserialize(snapshot).unwrap();
         let mut db = self.0.write().unwrap();
         let _ = std::mem::replace(&mut *db, new);
+        Ok(())
+    }
+    async fn init(&mut self, id: u64) -> RaftResult<()> {
         Ok(())
     }
 }
@@ -116,13 +121,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let options = Options::from_args();
     let store = HashStore::new();
+    let node_id = options.node_id.unwrap().parse::<u64>().unwrap();
 
     let raft = Raft::new(options.raft_addr, store.clone(), logger.clone());
     let mailbox = Arc::new(raft.mailbox());
     let (raft_handle, mailbox) = match options.peer_addr {
         Some(addr) => {
             info!("running in follower mode");
-            let handle = tokio::spawn(raft.join(addr));
+            let handle = tokio::spawn(raft.join(addr, node_id));
             (handle, mailbox)
         }
         None => {

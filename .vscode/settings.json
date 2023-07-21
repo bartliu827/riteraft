@@ -1,0 +1,6 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./examples/riteraft-memstore/Cargo.toml",
+        "./examples/riteraft-warp-memstore/Cargo.toml"
+    ]
+}

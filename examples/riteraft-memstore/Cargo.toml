@@ -20,3 +20,7 @@ slog = "2"
 slog-stdlog = "4"
 structopt = "0.3"
 tokio = { version = "0.2", features = ["full"] }
+
+heed = "0.10.6"
+heed-traits = "0.7"
+env_logger = "0.10.0"

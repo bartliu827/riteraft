@@ -35,7 +35,7 @@ macro_rules! heed_type {
             type EItem = $type;
             fn bytes_encode(item: &'a Self::EItem) -> Option<Cow<'a, [u8]>> {
                 let mut bytes = vec![];
-                prost::Message::encode(item, &mut bytes).ok()?;
+                Message::encode(item, &mut bytes).ok()?;
                 Some(Cow::Owned(bytes))
             }
         }
@@ -43,7 +43,7 @@ macro_rules! heed_type {
         impl<'a> BytesDecode<'a> for $heed_type {
             type DItem = $type;
             fn bytes_decode(bytes: &'a [u8]) -> Option<Self::DItem> {
-                prost::Message::decode(bytes).ok()
+                Message::decode(bytes).ok()
             }
         }
     };

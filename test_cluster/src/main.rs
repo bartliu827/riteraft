@@ -117,17 +117,17 @@ fn main() {
 
 //#[tokio::main]
 async fn main_fn(_rt: Arc<Runtime>) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
-    let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
+    // let decorator = slog_term::TermDecorator::new().build();
+    // let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    // let drain = slog_async::Async::new(drain).build().fuse();
+    // let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
 
-    // let logger = slog::Logger::root(
-    //     slog::Discard,
-    //     slog_o!("version" => env!("CARGO_PKG_VERSION")),
-    // );
+    let logger = slog::Logger::root(
+        slog::Discard,
+        slog_o!("version" => env!("CARGO_PKG_VERSION")),
+    );
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // converts log to slog
     // let _log_guard = slog_stdlog::init().unwrap();

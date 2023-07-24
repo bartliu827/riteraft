@@ -1,5 +1,6 @@
 mod error;
 mod message;
+mod my_storage;
 mod raft;
 mod raft_node;
 mod raft_server;

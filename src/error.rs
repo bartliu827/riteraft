@@ -20,6 +20,9 @@ pub enum Error {
     Other(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
     #[error("unexpected error")]
     Unknown,
+
+    #[error("common error: {0}")]
+    Common(String),
 }
 
 impl Error {

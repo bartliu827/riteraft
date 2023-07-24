@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::Result;
 use crate::message::{Message, RaftResponse};
+use crate::my_storage::MemStorage;
 use crate::raft::Store;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::storage::{HeedStorage, LogStore};
@@ -13,7 +14,7 @@ use bincode::{deserialize, serialize};
 use log::*;
 use prost::Message as PMessage;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
-use raft::storage::MemStorage;
+//use raft::storage::MemStorage;
 
 use raft::{prelude::*, raw_node::RawNode, Config};
 use tokio::sync::mpsc;
@@ -134,8 +135,8 @@ impl<S: Store + 'static> RaftNode<S> {
         s.mut_metadata().term = 1;
         s.mut_metadata().mut_conf_state().voters = vec![1];
 
-        //let mut storage = HeedStorage::create(".", 1).unwrap();
-        let storage = MemStorage::new();
+        let mut storage = MemStorage::create(".", 1).unwrap();
+        //let storage = MemStorage::new();
         storage.wl().apply_snapshot(s).unwrap();
         let mut inner = RawNode::new(&config, storage, logger).unwrap();
         let peers = HashMap::new();
@@ -176,8 +177,8 @@ impl<S: Store + 'static> RaftNode<S> {
 
         config.validate().unwrap();
 
-        //let storage = HeedStorage::create(".", id)?;
-        let storage = MemStorage::new();
+        let storage = MemStorage::create(".", id)?;
+        //let storage = MemStorage::new();
         let inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
@@ -403,7 +404,7 @@ impl<S: Store + 'static> RaftNode<S> {
         if let Some(commit) = light_rd.commit_index() {
             let store = self.mut_store();
             //store.set_commit(commit).unwrap();
-            store.wl().mut_hard_state().set_commit(commit);
+            store.wl().set_commit(commit);
         }
         // Send out the messages.
         self.handle_messages(light_rd.take_messages()).await;

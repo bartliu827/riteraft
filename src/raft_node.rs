@@ -14,6 +14,7 @@ use log::*;
 use prost::Message as PMessage;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
 use raft::storage::MemStorage;
+
 use raft::{prelude::*, raw_node::RawNode, Config};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -254,7 +255,7 @@ impl<S: Store + 'static> RaftNode<S> {
     }
 
     pub async fn run(mut self) -> Result<()> {
-        let mut heartbeat = Duration::from_millis(100);
+        let mut heartbeat = Duration::from_millis(10000);
         let mut now = Instant::now();
 
         // A map to contain sender to client responses
@@ -267,6 +268,7 @@ impl<S: Store + 'static> RaftNode<S> {
             }
             match timeout(heartbeat, self.rcv.recv()).await {
                 Ok(Some(Message::ConfigChange { chan, mut change })) => {
+                    info!("received ConfigChange from: {}", change.get_node_id());
                     // whenever a change id is 0, it's a message to self.
                     if change.get_node_id() == 0 {
                         change.set_node_id(self.id());
@@ -278,17 +280,24 @@ impl<S: Store + 'static> RaftNode<S> {
                         self.send_wrong_leader(chan);
                     } else {
                         // leader assign new id to peer
-                        debug!("received request from: {}", change.get_node_id());
+
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                         client_send.insert(seq, chan);
                         self.propose_conf_change(serialize(&seq).unwrap(), change)?;
                     }
                 }
                 Ok(Some(Message::Raft(m))) => {
-                    debug!("raft message: to={} from={}", self.raft.id, m.from);
+                    info!(
+                        "received Raft message: type={:?} from={} to={} ",
+                        m.get_msg_type(),
+                        m.from,
+                        self.raft.id,
+                    );
                     if let Ok(_a) = self.step(*m) {};
                 }
                 Ok(Some(Message::Propose { proposal, chan })) => {
+                    info!("received Propose message");
+
                     if !self.is_leader() {
                         // wrong leader send client cluster data
                         let leader_id = self.leader();
@@ -326,13 +335,15 @@ impl<S: Store + 'static> RaftNode<S> {
             let elapsed = now.elapsed();
             now = Instant::now();
             if elapsed > heartbeat {
-                heartbeat = Duration::from_millis(100);
+                heartbeat = Duration::from_millis(10000);
                 self.tick();
             } else {
                 heartbeat -= elapsed;
             }
 
-            self.on_ready(&mut client_send).await?;
+            info!("-----------befor on_ready----------{}", self.is_leader());
+            self.on_ready(&mut client_send).await.unwrap();
+            info!("-----------after on_ready----------{} \n", self.is_leader());
         }
     }
 
@@ -391,6 +402,7 @@ impl<S: Store + 'static> RaftNode<S> {
         // Update commit index.
         if let Some(commit) = light_rd.commit_index() {
             let store = self.mut_store();
+            //store.set_commit(commit).unwrap();
             store.wl().mut_hard_state().set_commit(commit);
         }
         // Send out the messages.
@@ -499,8 +511,8 @@ impl<S: Store + 'static> RaftNode<S> {
             {
                 let store = self.mut_store();
                 store.wl().set_conf_state(cs);
-                // store.wl().compact(last_applied)?;
-                // let _ = store.wl().create_snapshot(snapshot)?;
+                // store.compact(last_applied)?;
+                // let _ = store.create_snapshot(snapshot)?;
             }
         }
 

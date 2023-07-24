@@ -20,6 +20,7 @@ pub trait LogStore: Storage {
     fn create_snapshot(&mut self, data: Vec<u8>) -> Result<()>;
     fn apply_snapshot(&mut self, snapshot: Snapshot) -> Result<()>;
     fn compact(&mut self, index: u64) -> Result<()>;
+    fn set_commit(&mut self, index: u64) -> Result<()>;
 }
 
 const SNAPSHOT_KEY: &str = "snapshot";
@@ -96,13 +97,13 @@ impl HeedStorageCore {
         Ok(storage)
     }
 
-    fn set_hard_state(&self, writer: &mut heed::RwTxn, hard_state: &HardState) -> Result<()> {
+    pub fn set_hard_state(&self, writer: &mut heed::RwTxn, hard_state: &HardState) -> Result<()> {
         self.metadata_db
             .put::<_, Str, HeedHardState>(writer, HARD_STATE_KEY, hard_state)?;
         Ok(())
     }
 
-    fn hard_state(&self, reader: &heed::RoTxn) -> Result<HardState> {
+    pub fn hard_state(&self, reader: &heed::RoTxn) -> Result<HardState> {
         let hard_state = self
             .metadata_db
             .get::<_, Str, HeedHardState>(reader, HARD_STATE_KEY)?;
@@ -239,6 +240,17 @@ impl LogStore for HeedStorage {
         let mut writer = store.env.write_txn()?;
         store.append(&mut writer, entries)?;
         writer.commit()?;
+        Ok(())
+    }
+
+    fn set_commit(&mut self, index: u64) -> Result<()> {
+        let store = self.wl();
+        let mut writer = store.env.write_txn()?;
+        let mut hard_state = store.hard_state(&writer)?;
+        hard_state.set_commit(index);
+        store.set_hard_state(&mut writer, &hard_state)?;
+        writer.commit()?;
+
         Ok(())
     }
 
@@ -387,3 +399,5 @@ impl Storage for HeedStorage {
         }
     }
 }
+
+// --------------------------------------------------------------

@@ -10,6 +10,7 @@ use riteraft::{Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use structopt::StructOpt;
+use tokio::runtime::Runtime;
 use warp::{reply, Filter};
 
 use std::collections::HashMap;
@@ -61,10 +62,13 @@ impl Store for HashStore {
     }
 
     async fn snapshot(&self) -> RaftResult<Vec<u8>> {
-        Ok(serialize(&self.0.read().unwrap().clone())?)
+        let data = serialize(&self.0.read().unwrap().clone())?;
+        info!("--------------- snapshot {}", data.len());
+        Ok(data)
     }
 
     async fn restore(&mut self, snapshot: &[u8]) -> RaftResult<()> {
+        info!("--------------- restore {}", snapshot.len());
         let new: HashMap<String, String> = deserialize(snapshot).unwrap();
         let mut db = self.0.write().unwrap();
         let _ = std::mem::replace(&mut *db, new);
@@ -104,15 +108,29 @@ async fn leave(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
     Ok(reply::json(&"OK".to_string()))
 }
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+    rt.clone().block_on(async {
+        main_fn(rt).await.unwrap();
+    });
+}
+
+//#[tokio::main]
+async fn main_fn(_rt: Arc<Runtime>) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let decorator = slog_term::TermDecorator::new().build();
     let drain = slog_term::FullFormat::new(decorator).build().fuse();
     let drain = slog_async::Async::new(drain).build().fuse();
     let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
 
+    // let logger = slog::Logger::root(
+    //     slog::Discard,
+    //     slog_o!("version" => env!("CARGO_PKG_VERSION")),
+    // );
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+
     // converts log to slog
-    let _log_guard = slog_stdlog::init().unwrap();
+    // let _log_guard = slog_stdlog::init().unwrap();
 
     let options = Options::from_args();
     let store = HashStore::new();
@@ -161,3 +179,5 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     result.0?;
     Ok(())
 }
+
+// curl http://127.0.0.1:7011/put/100/v100

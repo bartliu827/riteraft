@@ -13,6 +13,7 @@ use bincode::{deserialize, serialize};
 use log::*;
 use prost::Message as PMessage;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
+use raft::storage::MemStorage;
 use raft::{prelude::*, raw_node::RawNode, Config};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -43,7 +44,7 @@ impl MessageSender {
                 Err(e) => {
                     if current_retry < self.max_retries {
                         current_retry += 1;
-                        tokio::time::delay_for(self.timeout).await;
+                        tokio::time::sleep(self.timeout).await;
                     } else {
                         debug!(
                             "error sending message after {} retries: {}",
@@ -94,7 +95,7 @@ impl Peer {
 }
 
 pub struct RaftNode<S: Store> {
-    inner: RawNode<HeedStorage>,
+    inner: RawNode<MemStorage>,
     // the peer is optional, because an id can be reserved and later populated
     pub peers: HashMap<u64, Option<Peer>>,
     pub rcv: mpsc::Receiver<Message>,
@@ -132,8 +133,9 @@ impl<S: Store + 'static> RaftNode<S> {
         s.mut_metadata().term = 1;
         s.mut_metadata().mut_conf_state().voters = vec![1];
 
-        let mut storage = HeedStorage::create(".", 1).unwrap();
-        storage.apply_snapshot(s).unwrap();
+        //let mut storage = HeedStorage::create(".", 1).unwrap();
+        let storage = MemStorage::new();
+        storage.wl().apply_snapshot(s).unwrap();
         let mut inner = RawNode::new(&config, storage, logger).unwrap();
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
@@ -173,7 +175,8 @@ impl<S: Store + 'static> RaftNode<S> {
 
         config.validate().unwrap();
 
-        let storage = HeedStorage::create(".", id)?;
+        //let storage = HeedStorage::create(".", id)?;
+        let storage = MemStorage::new();
         let inner = RawNode::new(&config, storage, logger)?;
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
@@ -340,26 +343,74 @@ impl<S: Store + 'static> RaftNode<S> {
         if !self.has_ready() {
             return Ok(());
         }
-
         let mut ready = self.ready();
+
+        self.handle_messages(ready.take_messages()).await;
+
+        if !ready.snapshot().is_empty() {
+            let snapshot = ready.snapshot();
+            //self.store.restore(snapshot.get_data()).await?;
+            let store = self.mut_store();
+            store.wl().apply_snapshot(snapshot.clone())?;
+            info!("on_ready apply_snapshot={:?}", snapshot);
+        }
+
+        self.handle_committed_entries(ready.take_committed_entries(), client_send)
+            .await;
 
         if !ready.entries().is_empty() {
             let entries = ready.entries();
             let store = self.mut_store();
-            store.append(entries).unwrap();
+            store.wl().append(entries).unwrap();
+            for entry in entries.iter() {
+                let seq: u64 = deserialize(&entry.get_context()).unwrap_or(0);
+                info!(
+                    "on_ready entries type={:?} term={} index={} seq={} ",
+                    entry.get_entry_type(),
+                    entry.term,
+                    entry.index,
+                    seq
+                );
+            }
         }
 
         if let Some(hs) = ready.hs() {
             // Raft HardState changed, and we need to persist it.
             let store = self.mut_store();
-            store.set_hard_state(hs).unwrap();
+            store.wl().set_hardstate(hs.clone());
+            info!("on_ready set_hard_state={:?}", hs);
         }
 
-        for message in ready.messages.drain(..) {
-            debug!(
-                "message from {} to {}",
+        if !ready.persisted_messages().is_empty() {
+            // Send out the persisted messages come from the node.
+            self.handle_messages(ready.take_persisted_messages()).await;
+        }
+
+        // Call `RawNode::advance` interface to update position flags in the raft.
+        let mut light_rd = self.advance(ready);
+        // Update commit index.
+        if let Some(commit) = light_rd.commit_index() {
+            let store = self.mut_store();
+            store.wl().mut_hard_state().set_commit(commit);
+        }
+        // Send out the messages.
+        self.handle_messages(light_rd.take_messages()).await;
+        // Apply all committed entries.
+        self.handle_committed_entries(light_rd.take_committed_entries(), client_send)
+            .await;
+        // Advance the apply index.
+        self.advance_apply();
+
+        Ok(())
+    }
+
+    async fn handle_messages(&mut self, msgs: Vec<RaftMessage>) {
+        for message in msgs.iter() {
+            info!(
+                "on_ready messages type={:?} from {} to {} ",
+                message.get_msg_type(),
                 message.get_from(),
-                message.get_to()
+                message.get_to(),
             );
             let client = match self.peer_mut(message.get_to()) {
                 Some(ref peer) => peer.client.clone(),
@@ -370,49 +421,48 @@ impl<S: Store + 'static> RaftNode<S> {
                 client_id: message.get_to(),
                 client: client.clone(),
                 chan: self.snd.clone(),
-                message,
+                message: message.clone(),
                 timeout: Duration::from_millis(100),
                 max_retries: 5,
             };
             tokio::spawn(message_sender.send());
         }
+    }
 
-        if !ready.snapshot().is_empty() {
-            let snapshot = ready.snapshot();
-            self.store.restore(snapshot.get_data()).await?;
-            let store = self.mut_store();
-            store.apply_snapshot(snapshot.clone())?;
-        }
+    async fn handle_committed_entries(
+        &mut self,
+        committed_entries: Vec<Entry>,
+        client_send: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+    ) {
+        let mut last_apply_index;
+        for entry in &committed_entries {
+            // Mostly, you need to save the last apply index to resume applying
+            // after restart. Here we just ignore this because we use a Memory storage.
+            last_apply_index = entry.get_index();
+            let seq: u64 = deserialize(&entry.get_context()).unwrap_or(0);
+            info!(
+                "on_ready committed_entries type={:?} term={} index={} seq={} last_apply_index={}",
+                entry.get_entry_type(),
+                entry.term,
+                entry.index,
+                seq,
+                last_apply_index
+            );
 
-        if let Some(hs) = ready.hs() {
-            // Raft HardState changed, and we need to persist it.
-            let store = self.mut_store();
-            store.set_hard_state(hs)?;
-        }
+            if entry.get_data().is_empty() {
+                // Emtpy entry, when the peer becomes Leader it will send an empty entry.
+                continue;
+            }
 
-        if let Some(committed_entries) = ready.committed_entries.take() {
-            let mut _last_apply_index = 0;
-            for entry in &committed_entries {
-                // Mostly, you need to save the last apply index to resume applying
-                // after restart. Here we just ignore this because we use a Memory storage.
-                _last_apply_index = entry.get_index();
-
-                if entry.get_data().is_empty() {
-                    // Emtpy entry, when the peer becomes Leader it will send an empty entry.
-                    continue;
-                }
-
-                match entry.get_entry_type() {
-                    EntryType::EntryNormal => self.handle_normal(&entry, client_send).await?,
-                    EntryType::EntryConfChange => {
-                        self.handle_config_change(&entry, client_send).await?
-                    }
-                    EntryType::EntryConfChangeV2 => unimplemented!(),
-                }
+            match entry.get_entry_type() {
+                EntryType::EntryNormal => self.handle_normal(&entry, client_send).await.unwrap(),
+                EntryType::EntryConfChange => self
+                    .handle_config_change(&entry, client_send)
+                    .await
+                    .unwrap(),
+                EntryType::EntryConfChangeV2 => unimplemented!(),
             }
         }
-        self.advance(ready);
-        Ok(())
     }
 
     async fn handle_config_change(
@@ -448,9 +498,9 @@ impl<S: Store + 'static> RaftNode<S> {
             let snapshot = self.store.snapshot().await?;
             {
                 let store = self.mut_store();
-                store.set_conf_state(&cs)?;
-                store.compact(last_applied)?;
-                let _ = store.create_snapshot(snapshot)?;
+                store.wl().set_conf_state(cs);
+                // store.wl().compact(last_applied)?;
+                // let _ = store.wl().create_snapshot(snapshot)?;
             }
         }
 
@@ -481,21 +531,21 @@ impl<S: Store + 'static> RaftNode<S> {
             sender.send(RaftResponse::Response { data }).unwrap();
         }
 
-        if Instant::now() > self.last_snap_time + Duration::from_secs(15) {
-            info!("creating backup..");
-            self.last_snap_time = Instant::now();
-            let last_applied = self.raft.raft_log.applied;
-            let snapshot = self.store.snapshot().await?;
-            let store = self.mut_store();
-            store.compact(last_applied).unwrap();
-            let _ = store.create_snapshot(snapshot);
-        }
+        // if Instant::now() > self.last_snap_time + Duration::from_secs(15) {
+        //     info!("creating backup..");
+        //     self.last_snap_time = Instant::now();
+        //     let last_applied = self.raft.raft_log.applied;
+        //     let snapshot = self.store.snapshot().await?;
+        //     let store = self.mut_store();
+        //     store.compact(last_applied).unwrap();
+        //     let _ = store.create_snapshot(snapshot);
+        // }
         Ok(())
     }
 }
 
 impl<S: Store> Deref for RaftNode<S> {
-    type Target = RawNode<HeedStorage>;
+    type Target = RawNode<MemStorage>;
 
     fn deref(&self) -> &Self::Target {
         &self.inner

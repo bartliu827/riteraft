@@ -22,11 +22,11 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, StructOpt)]
 struct Options {
     #[structopt(long)]
-    raft_addr: String,
+    raft_port: String,
     #[structopt(long)]
-    peer_addr: Option<String>,
+    peer_port: Option<String>,
     #[structopt(long)]
-    web_server: Option<String>,
+    web_port: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,16 +49,15 @@ impl HashStore {
 #[async_trait]
 impl Store for HashStore {
     async fn apply(&mut self, message: &[u8]) -> RaftResult<Vec<u8>> {
-        let message: Message = deserialize(message).unwrap();
-        let message: Vec<u8> = match message {
-            Message::Insert { key, value } => {
-                let mut db = self.0.write().unwrap();
-                db.insert(key.clone(), value.clone());
-                info!("inserted: ({}, {})", key, value);
-                serialize(&value).unwrap()
-            }
-        };
-        Ok(message)
+        let message = String::from_utf8(message.to_vec()).unwrap();
+        let data: Vec<&str> = message.split(" ").collect();
+        let (key, value) = (data[0], data[1]);
+        let mut db = self.0.write().unwrap();
+        db.insert(key.to_string(), value.to_string());
+        info!("inserted: ({}, {})", key, value);
+        let resp = serialize(&value).unwrap();
+
+        Ok(resp)
     }
 
     async fn snapshot(&self) -> RaftResult<Vec<u8>> {
@@ -91,9 +90,8 @@ async fn put(
     key: String,
     value: String,
 ) -> Result<impl warp::Reply, Infallible> {
-    let message = Message::Insert { key, value };
-    let message = serialize(&message).unwrap();
-    let result = mailbox.send(message).await.unwrap();
+    let message = format!("{} {}", key, value);
+    let result = mailbox.send(message.into()).await.unwrap();
     let result: String = deserialize(&result).unwrap();
     Ok(reply::json(&result))
 }
@@ -135,12 +133,12 @@ async fn main_fn(_rt: Arc<Runtime>) -> std::result::Result<(), Box<dyn std::erro
     let options = Options::from_args();
     let store = HashStore::new();
 
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone());
+    let raft = Raft::new(options.raft_port, store.clone(), logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    let (raft_handle, mailbox) = match options.peer_addr {
-        Some(addr) => {
+    let (raft_handle, mailbox) = match options.peer_port {
+        Some(port) => {
             info!("running in follower mode");
-            let handle = tokio::spawn(raft.join(addr));
+            let handle = tokio::spawn(raft.join(port));
             (handle, mailbox)
         }
         None => {
@@ -167,10 +165,11 @@ async fn main_fn(_rt: Arc<Runtime>) -> std::result::Result<(), Box<dyn std::erro
 
     let routes = put_kv.or(get_kv).or(leave_kv);
 
-    if let Some(addr) = options.web_server {
+    if let Some(port) = options.web_port {
+        let web_addr = format!("127.0.0.1:{}", port);
         let _server = tokio::spawn(async move {
             warp::serve(routes)
-                .run(SocketAddr::from_str(&addr).unwrap())
+                .run(SocketAddr::from_str(&web_addr).unwrap())
                 .await;
         });
     }
